@@ -163,6 +163,47 @@ tasks.register('replayPhysicsRegression', JavaExec) {
     mainClass = 'com.antielytratarget.replay.ReplayPhysicsRegressionSimulation'
 }
 
+tasks.register('replayRecorderLifecycleRegression', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    group = 'verification'
+    description = 'Verifies that finishing a replay cancels late-published recording tasks.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.antielytratarget.replay.ReplayRecorderLifecycleRegressionSimulation'
+}
+
+tasks.register('transactionEntryConcurrency', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    group = 'verification'
+    description = 'Verifies publication of confirmed transaction timestamps.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.antielytratarget.netty.TransactionEntryConcurrencySimulation'
+}
+
+tasks.register('transactionTrackerRegression', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    group = 'verification'
+    description = 'Verifies bounded transaction history, acknowledgements and ping ID rollover.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.antielytratarget.netty.TransactionTrackerRegressionSimulation'
+}
+
+tasks.register('profileHistoryRegression', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    group = 'verification'
+    description = 'Verifies profile retention stays bounded while parsing flag history.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.antielytratarget.managers.ProfileHistoryRegressionSimulation'
+}
+
+tasks.register('aimAllocationBenchmark', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    group = 'verification'
+    description = 'Measures delta-calculation allocations against the legacy algorithm on HotSpot.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.antielytratarget.utils.AimStatisticsRegressionSimulation'
+    args '--allocation-benchmark'
+}
+
 tasks.register('folia2612Compatibility', JavaExec) {
     dependsOn tasks.named('testClasses')
     group = 'verification'
@@ -183,6 +224,10 @@ tasks.named('check') {
     dependsOn tasks.named('grimTickReliabilityRegression')
     dependsOn tasks.named('incapableSwapRegression')
     dependsOn tasks.named('replayPhysicsRegression')
+    dependsOn tasks.named('replayRecorderLifecycleRegression')
+    dependsOn tasks.named('transactionEntryConcurrency')
+    dependsOn tasks.named('transactionTrackerRegression')
+    dependsOn tasks.named('profileHistoryRegression')
     dependsOn tasks.named('folia2612Compatibility')
 }
 

@@ -128,7 +128,7 @@ private RecordingSession startSession(Player player, String reason) {
 
         plugin.debug("[Replay] Started recording for " + player.getName() + " — reason: " + reason);
 
-        session.tickTask = SchedulerUtil.runForEntityTimer(plugin, player,
+        SchedulerUtil.TaskWrapper tickTask = SchedulerUtil.runForEntityTimer(plugin, player,
                 () -> captureSessionTick(uuid, player, session),
                 () -> {
                     if (activeSessions.remove(uuid, session)) {
@@ -136,6 +136,7 @@ private RecordingSession startSession(Player player, String reason) {
                     }
                 },
                 1L, 1L);
+        session.attachTickTask(tickTask);
         plugin.debug("[Replay] Recording starts at the second flag for " + player.getName());
         return session;
     }
@@ -295,16 +296,8 @@ private void finishSession(UUID uuid) {
             priorityTargets.clear();
             recentlyDamagedActors.clear();
         }
-        ReplayData data;
-        SchedulerUtil.TaskWrapper task;
-        synchronized (session) {
-            if (session.finished) return;
-            session.finished = true;
-            task = session.tickTask;
-            session.tickTask = null;
-            data = session.data;
-        }
-        if (task != null) task.cancel();
+        if (!session.finish()) return;
+        ReplayData data = session.data;
         if (data.snapshotCount() == 0) return;
 
         pendingSaves.offer(data);
@@ -376,7 +369,7 @@ private void finishSession(UUID uuid) {
                 }));
     }
 
-    private static final class RecordingSession {
+    static final class RecordingSession {
         private final ReplayData data;
         private final AtomicBoolean pendingSwing = new AtomicBoolean();
         private final AtomicInteger pendingFireworkPower = new AtomicInteger();
@@ -388,9 +381,33 @@ private void finishSession(UUID uuid) {
         private int fireworkTicksRemaining;
         private boolean finished;
 
-        private RecordingSession(ReplayData data, int remainingTicks) {
+        RecordingSession(ReplayData data, int remainingTicks) {
             this.data = data;
             this.remainingTicks = remainingTicks;
+        }
+
+        void attachTickTask(SchedulerUtil.TaskWrapper task) {
+            synchronized (this) {
+                if (!finished) {
+                    tickTask = task;
+                    return;
+                }
+            }
+            // A stop or scheduler retirement may finish the session while task
+            // creation is still returning its handle. Do not leave it repeating.
+            if (task != null) task.cancel();
+        }
+
+        boolean finish() {
+            SchedulerUtil.TaskWrapper task;
+            synchronized (this) {
+                if (finished) return false;
+                finished = true;
+                task = tickTask;
+                tickTask = null;
+            }
+            if (task != null) task.cancel();
+            return true;
         }
     }
 

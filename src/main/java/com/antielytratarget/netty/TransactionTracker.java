@@ -17,8 +17,10 @@ public class TransactionTracker {
 
 private static final int PKT_CLIENTBOUND_PING = 0x36;
     private static final int PKT_SERVERBOUND_PONG = 0x26;
+    private static final int MIN_TRANSACTION_ID = 20000;
+    private static final int MAX_TRANSACTION_ID = 30000;
 
-private final AtomicInteger idCounter = new AtomicInteger(30001);
+private final AtomicInteger idCounter = new AtomicInteger(MAX_TRANSACTION_ID + 1);
 
 private final ConcurrentLinkedDeque<TransactionEntry> pending = new ConcurrentLinkedDeque<>();
 
@@ -28,7 +30,7 @@ private final AtomicLong lastConfirmedTick = new AtomicLong(-1);
     private final AtomicInteger lastTransactionReceived = new AtomicInteger(0);
     private volatile long lastPongTimeNanos = 0;
 
-public void sendTransaction(Channel channel, long serverTick) {
+public synchronized void sendTransaction(Channel channel, long serverTick) {
         if (channel == null || !channel.isActive()) return;
 
         int id = nextId();
@@ -43,7 +45,7 @@ channel.eventLoop().execute(() -> {
         });
     }
 
-    public void sendTransaction(User user, long serverTick) {
+    public synchronized void sendTransaction(User user, long serverTick) {
         if (user == null) return;
 
         int id = nextId();
@@ -62,38 +64,37 @@ channel.eventLoop().execute(() -> {
         }
     }
 
-public boolean onPong(int pongId) {
-        boolean pendingId = false;
+public synchronized boolean onPong(int pongId) {
+        if (pongId != (short) pongId) return false;
+
+        TransactionEntry target = null;
         for (TransactionEntry entry : pending) {
             if (entry.id == (short) pongId) {
-                pendingId = true;
+                target = entry;
                 break;
             }
         }
-        if (!pendingId) return false;
+        if (target == null) return false;
 
-        boolean found = false;
         long now = System.nanoTime();
 
-while (!pending.isEmpty()) {
-            TransactionEntry entry = pending.peekFirst();
-            if (entry == null) break;
+        TransactionEntry entry;
+while ((entry = pending.pollFirst()) != null) {
 
             entry.confirm();
             lastConfirmedTick.set(entry.serverTick);
             latencyNanos.set(now - entry.sendTimeNanos);
             lastPongTimeNanos = now;
-            lastTransactionReceived.incrementAndGet();
+            // Pending entries may have been evicted while awaiting a reply. A
+            // confirmed packet still acknowledges its original send sequence.
+            lastTransactionReceived.set(entry.sequence);
 
-            pending.pollFirst();
-
-            if (entry.id == (short) pongId) {
-                found = true;
-                break;
+            if (entry == target) {
+                return true;
             }
         }
 
-        return found;
+        return false;
     }
 
 public boolean handleInbound(int packetId, ByteBuf buf) {
@@ -139,18 +140,13 @@ public boolean isCalibrated() {
     }
 
 private int nextId() {
-        int id = idCounter.decrementAndGet();
-
-        if (id < 20000) {
-            idCounter.set(30001);
-            id = 30000;
-        }
-        return id;
+        return idCounter.updateAndGet(current ->
+                current <= MIN_TRANSACTION_ID ? MAX_TRANSACTION_ID : current - 1);
     }
 
-    private void addPending(short id, long serverTick) {
-        pending.addLast(new TransactionEntry(id, serverTick, System.nanoTime()));
-        lastTransactionSent.incrementAndGet();
+    private synchronized void addPending(short id, long serverTick) {
+        int sequence = lastTransactionSent.incrementAndGet();
+        pending.addLast(new TransactionEntry(id, serverTick, System.nanoTime(), sequence));
 
         while (pending.size() > 100) {
             pending.pollFirst();

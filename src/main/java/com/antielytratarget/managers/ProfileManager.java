@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 public class ProfileManager {
 
@@ -27,11 +28,7 @@ private final Map<UUID, List<FlagLogEntry>> profiles = new ConcurrentHashMap<>()
 
 public void addEntry(UUID uuid, FlagLogEntry entry) {
         List<FlagLogEntry> profile = profiles.computeIfAbsent(uuid, k -> Collections.synchronizedList(new ArrayList<>()));
-        synchronized (profile) {
-            profile.add(entry);
-            int max = config.getMaxProfileEntries();
-            while (profile.size() > max) profile.remove(0);
-        }
+        appendEntry(profile, entry, config.getMaxProfileEntries());
     }
 
     public List<FlagLogEntry> getProfile(UUID uuid) {
@@ -69,7 +66,10 @@ public Map.Entry<UUID, List<FlagLogEntry>> findByName(String name) {
         return null;
     }
 
-    public int     getTotalFlags(UUID uuid)   { return getProfile(uuid).size(); }
+    public int getTotalFlags(UUID uuid) {
+        List<FlagLogEntry> profile = profiles.get(uuid);
+        return profile != null ? profile.size() : 0;
+    }
     public void    clearProfile(UUID uuid)    { profiles.remove(uuid); }
     public Set<UUID> getAllTrackedUUIDs()      { return Collections.unmodifiableSet(profiles.keySet()); }
     public int     getTrackedPlayerCount()    { return profiles.size(); }
@@ -91,34 +91,49 @@ public void loadAllProfiles() {
             return;
         }
         Map<String, UUID> knownPlayers = buildPlayerUuidIndex();
+        Function<String, UUID> uuidResolver = name -> resolvePlayerUuid(name, knownPlayers);
+        int max = Math.max(0, config.getMaxProfileEntries());
         int loaded = 0;
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(Files.newInputStream(logPath), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                FlagLogEntry entry = FlagLogEntry.fromLogLine(
-                        line, name -> resolvePlayerUuid(name, knownPlayers));
-                if (entry == null) continue;
-                List<FlagLogEntry> profile = profiles.computeIfAbsent(
-                        entry.getPlayerUUID(),
-                        k -> Collections.synchronizedList(new ArrayList<>()));
-                synchronized (profile) {
-                    profile.add(entry);
-                }
-                loaded++;
+                if (appendLogLine(line, uuidResolver, profiles, max)) loaded++;
             }
         } catch (IOException e) {
             plugin.getLogger().warning("[AET] Failed to load flag history: " + e.getMessage());
         }
 
-        int max = config.getMaxProfileEntries();
         for (List<FlagLogEntry> profile : profiles.values()) {
             synchronized (profile) {
-                while (profile.size() > max) profile.remove(0);
+                int excess = profile.size() - max;
+                if (excess > 0) profile.subList(0, excess).clear();
             }
         }
         plugin.getLogger().info("[AET] Loaded " + loaded + " historical flag entries for "
                 + profiles.size() + " players.");
+    }
+
+    static boolean appendLogLine(String line, Function<String, UUID> uuidResolver,
+                                 Map<UUID, List<FlagLogEntry>> profiles, int max) {
+        FlagLogEntry entry = FlagLogEntry.fromLogLine(line, uuidResolver);
+        if (entry == null) return false;
+        List<FlagLogEntry> profile = profiles.computeIfAbsent(entry.getPlayerUUID(),
+                key -> Collections.synchronizedList(new ArrayList<>()));
+        appendEntry(profile, entry, max);
+        return true;
+    }
+
+    private static void appendEntry(List<FlagLogEntry> profile, FlagLogEntry entry, int max) {
+        int limit = Math.max(0, max);
+        synchronized (profile) {
+            // Keep history bounded while reading the file, not only after the entire log is loaded.
+            int excess = profile.size() - limit + 1;
+            if (excess > 0 && !profile.isEmpty()) {
+                profile.subList(0, Math.min(excess, profile.size())).clear();
+            }
+            if (limit > 0) profile.add(entry);
+        }
     }
 
     private Map<String, UUID> buildPlayerUuidIndex() {

@@ -209,10 +209,10 @@ public static BidirectionalOutlierEvidence getBidirectionalOutlierEvidence(
     }
 
     public static List<Float> getJiffDelta(List<? extends Number> data, int depth) {
-        List<Float> result = new ArrayList<>();
+        List<Float> result = new ArrayList<>(data.size());
         for (Number n : data) result.add(n.floatValue());
-        for (int i = 0; i < depth; i++) {
-            List<Float> calculate = new ArrayList<>();
+        for (int i = 0; i < depth && !result.isEmpty(); i++) {
+            List<Float> calculate = new ArrayList<>(Math.max(0, result.size() - 1));
             float old = Float.MIN_VALUE;
             for (float n : result) {
                 if (old == Float.MIN_VALUE) {
@@ -222,7 +222,7 @@ public static BidirectionalOutlierEvidence getBidirectionalOutlierEvidence(
                 calculate.add(Math.abs(Math.abs(n) - Math.abs(old)));
                 old = n;
             }
-            result = new ArrayList<>(calculate);
+            result = calculate;
         }
         return result;
     }

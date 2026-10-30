@@ -1,9 +1,16 @@
 package com.antielytratarget.replay;
 
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.UUID;
+import java.util.zip.GZIPOutputStream;
 
 public final class ReplayPhysicsRegressionSimulation {
 
@@ -14,6 +21,11 @@ public final class ReplayPhysicsRegressionSimulation {
         verifyFireworkMetadataCompatibility();
         verifyFireworkChangesSimulatedFlight();
         verifyCompressedReplayRoundTrip();
+        verifyLegacyReplayHeaders();
+        verifyReaderOwnership();
+        verifyDecoderInitializationFailureClosesInput();
+        verifyFormatDetectionFailureClosesInput();
+        verifyCloseFailureIsSuppressed();
         System.out.println("Replay physics regression simulation passed.");
     }
 
@@ -71,6 +83,142 @@ public final class ReplayPhysicsRegressionSimulation {
         } finally {
             Files.deleteIfExists(file);
             Files.deleteIfExists(directory);
+        }
+    }
+
+    private static void verifyLegacyReplayHeaders() throws Exception {
+        Path directory = Files.createTempDirectory("aet-legacy-replay-regression-");
+        UUID uuid = UUID.randomUUID();
+        String legacy = "HEADER|" + uuid + "|LegacyTest|legacy|2026-10-29 18:00:00|1\n"
+                + new ReplayFlagSnapshot(0, 0L, "LegacyCheck", 2).toLine() + "\n"
+                + snapshot(1.0, 80.0, 2.0, 0.1, -0.1, 0.3, 0, false).toLine() + "\n";
+        try {
+            for (boolean compressed : new boolean[] { false, true }) {
+                Path file = directory.resolve(compressed ? "legacy-gzip.replay" : "legacy-plain.replay");
+                try {
+                    byte[] content = legacy.getBytes(StandardCharsets.UTF_8);
+                    Files.write(file, compressed ? gzip(content) : content);
+                    ReplayData loaded = ReplayData.loadFromFile(file.toFile());
+                    ReplayData.Summary summary = ReplayData.loadSummaryFromFile(file.toFile());
+                    require(loaded.getPlayerUUID().equals(uuid) && loaded.snapshotCount() == 1,
+                            "six-field legacy headers must load in plain and GZIP files");
+                    require(loaded.getFlagEvents().size() == 1 && summary.getSnapshotCount() == 1,
+                            "legacy summaries must count frames without counting flag lines");
+                } finally {
+                    Files.deleteIfExists(file);
+                }
+            }
+        } finally {
+            Files.deleteIfExists(directory);
+        }
+    }
+
+    private static void verifyReaderOwnership() throws Exception {
+        byte[] content = "HEADER|reader ownership\n".getBytes(StandardCharsets.UTF_8);
+        for (boolean compressed : new boolean[] { false, true }) {
+            CloseTrackingInputStream input = new CloseTrackingInputStream(compressed ? gzip(content) : content);
+            try (BufferedReader reader = ReplayData.openReader(input)) {
+                require(input.closeCount == 0,
+                        "successful initialization must keep the input open for the reader");
+                require("HEADER|reader ownership".equals(reader.readLine()),
+                        "format detection must preserve the beginning of plain and GZIP input");
+            }
+            require(input.closeCount == 1, "closing the reader must close its input exactly once");
+        }
+
+        CloseTrackingInputStream empty = new CloseTrackingInputStream(new byte[0]);
+        try (BufferedReader reader = ReplayData.openReader(empty)) {
+            require(reader.readLine() == null, "empty input must remain readable as an empty text stream");
+        }
+        require(empty.closeCount == 1, "an empty input must also be owned by the reader");
+    }
+
+    private static void verifyDecoderInitializationFailureClosesInput() throws Exception {
+        CloseTrackingInputStream input = new CloseTrackingInputStream(new byte[] { 0x1f, (byte) 0x8b, 0 });
+        try {
+            ReplayData.openReader(input);
+            throw new AssertionError("a truncated GZIP header must fail during decoder initialization");
+        } catch (IOException expected) {
+            require(input.closeCount == 1, "failed GZIP initialization must close the input exactly once");
+        }
+    }
+
+    private static void verifyFormatDetectionFailureClosesInput() throws Exception {
+        CloseTrackingInputStream input = new CloseTrackingInputStream(new byte[0]);
+        IOException readFailure = new IOException("format detection failed");
+        input.readFailure = readFailure;
+        try {
+            ReplayData.openReader(input);
+            throw new AssertionError("a failing input must fail format detection");
+        } catch (IOException expected) {
+            require(expected == readFailure, "format detection must preserve the original I/O error");
+            require(input.closeCount == 1, "failed format detection must close the input exactly once");
+        }
+    }
+
+    private static void verifyCloseFailureIsSuppressed() throws Exception {
+        CloseTrackingInputStream sniffInput = new CloseTrackingInputStream(new byte[0]);
+        IOException readFailure = new IOException("format detection failed");
+        IOException closeFailure = new IOException("input close failed");
+        sniffInput.readFailure = readFailure;
+        sniffInput.closeFailure = closeFailure;
+        try {
+            ReplayData.openReader(sniffInput);
+            throw new AssertionError("a failing input must fail format detection");
+        } catch (IOException expected) {
+            require(expected == readFailure, "a cleanup error must not replace the format detection error");
+            require(expected.getSuppressed().length == 1 && expected.getSuppressed()[0] == closeFailure,
+                    "format detection must retain the close error as suppressed");
+        }
+
+        CloseTrackingInputStream gzipInput = new CloseTrackingInputStream(new byte[] { 0x1f, (byte) 0x8b, 0 });
+        gzipInput.closeFailure = closeFailure;
+        try {
+            ReplayData.openReader(gzipInput);
+            throw new AssertionError("a truncated GZIP header must fail");
+        } catch (IOException expected) {
+            require(expected != closeFailure, "a cleanup error must not replace the GZIP initialization error");
+            require(expected.getSuppressed().length == 1 && expected.getSuppressed()[0] == closeFailure,
+                    "GZIP initialization must retain the close error as suppressed");
+            require(gzipInput.closeCount == 1, "GZIP cleanup must attempt to close the input exactly once");
+        }
+    }
+
+    private static byte[] gzip(byte[] content) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(bytes)) {
+            gzip.write(content);
+        }
+        return bytes.toByteArray();
+    }
+
+    private static final class CloseTrackingInputStream extends InputStream {
+        private final ByteArrayInputStream input;
+        private IOException readFailure;
+        private IOException closeFailure;
+        private int closeCount;
+
+        private CloseTrackingInputStream(byte[] content) {
+            this.input = new ByteArrayInputStream(content);
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (readFailure != null) throw readFailure;
+            return input.read();
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            if (readFailure != null) throw readFailure;
+            return input.read(buffer, offset, length);
+        }
+
+        @Override
+        public void close() throws IOException {
+            closeCount++;
+            input.close();
+            if (closeFailure != null) throw closeFailure;
         }
     }
 

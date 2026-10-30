@@ -185,15 +185,32 @@ public static ReplayData loadFromFile(File file) throws IOException {
     }
 
     private static BufferedReader openReader(File file) throws IOException {
-        BufferedInputStream input = new BufferedInputStream(new FileInputStream(file));
-        input.mark(2);
-        int first = input.read();
-        int second = input.read();
-        input.reset();
-        InputStream decoded = first == 0x1f && second == 0x8b
-                ? new GZIPInputStream(input)
-                : input;
-        return new BufferedReader(new InputStreamReader(decoded, StandardCharsets.UTF_8));
+        return openReader(new FileInputStream(file));
+    }
+
+    /**
+     * Transfers ownership of the stream to the returned reader, or closes it if
+     * format detection or decoder initialization fails before a reader exists.
+     */
+    static BufferedReader openReader(InputStream source) throws IOException {
+        BufferedInputStream input = new BufferedInputStream(source);
+        try {
+            input.mark(2);
+            int first = input.read();
+            int second = input.read();
+            input.reset();
+            InputStream decoded = first == 0x1f && second == 0x8b
+                    ? new GZIPInputStream(input)
+                    : input;
+            return new BufferedReader(new InputStreamReader(decoded, StandardCharsets.UTF_8));
+        } catch (IOException | RuntimeException | Error failure) {
+            try {
+                input.close();
+            } catch (IOException | RuntimeException | Error closeFailure) {
+                if (closeFailure != failure) failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
     }
 
     public static final class Summary {
